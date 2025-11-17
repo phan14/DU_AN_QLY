@@ -1,7 +1,8 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import dayjs from "dayjs";
+import * as XLSX from "xlsx"; // ← THÊM DÒNG NÀY
 import { supabase } from "../lib/supabaseClient";
 import {
   ChevronLeft,
@@ -10,9 +11,13 @@ import {
   ChevronsRight,
   Package,
   Calendar,
-  User,
   Filter,
-  X
+  X,
+  Upload,
+  Download,
+  Users,
+  Check,
+
 } from "lucide-react";
 
 type OrderRow = {
@@ -93,6 +98,14 @@ export default function OrdersPage() {
   const [totalCount, setTotalCount] = useState(0);
   const [loading, setLoading] = useState(false);
   const [previewImage, setPreviewImage] = useState<string | null>(null);
+
+  // === Xuất Excel theo khách ===
+  const [showCustomerExport, setShowCustomerExport] = useState(false);
+  const [customerSearch, setCustomerSearch] = useState(""); // ← Dùng state thay ref để realtime
+
+  // const customerSearchRef = useRef<HTMLInputElement>(null);
+  // const [showCustomerExport, setShowCustomerExport] = useState(false);
+  // const [selectedCustomerForExport, setSelectedCustomerForExport] = useState<Customer | null>(null);
 
   // === Bộ lọc ===
   const [search, setSearch] = useState("");
@@ -273,10 +286,136 @@ export default function OrdersPage() {
     setDueDateFrom("");
     setDueDateTo("");
   };
+  const exportCustomerOrders = async (customer: Customer) => {
+    if (!customer) return;
+
+    // 1. Lấy tất cả đơn của khách này
+    const { data: orders, error } = await supabase
+      .from("orders")
+      .select(`
+      id,
+      order_code,
+      order_date,
+      due_date,
+      actual_delivery_date,
+      status,
+      total_amount,
+      order_items (
+        product_name,
+        color,
+        size,
+        quantity,
+        actual_quantity,
+        unit_price
+      )
+    `)
+      .eq("customer_id", customer.id)
+      .order("order_date", { ascending: false });
+
+    if (error) {
+      alert("Lỗi tải dữ liệu: " + error.message);
+      return;
+    }
+
+    if (!orders || orders.length === 0) {
+      alert(`Khách ${customer.name} chưa có đơn hàng nào.`);
+      return;
+    }
+
+    // 2. Tạo dữ liệu cho 2 sheet
+    const orderRows = orders.map((o: any) => ({
+      "Mã đơn": o.order_code || `#${o.id}`,
+      "Ngày đặt": o.order_date ? dayjs(o.order_date).format("DD/MM/YYYY") : "",
+      "Hạn giao": o.due_date ? dayjs(o.due_date).format("DD/MM/YYYY") : "",
+      "Ngày giao thực tế": o.actual_delivery_date ? dayjs(o.actual_delivery_date).format("DD/MM/YYYY") : "",
+      "Trạng thái": STATUS_OPTIONS.find(s => s.value === o.status)?.label || o.status,
+      "Tổng tiền": o.total_amount ? Number(o.total_amount).toLocaleString("vi-VN") + " đ" : "",
+    }));
+
+    const itemRows: any[] = [];
+    orders.forEach((o: any) => {
+      const items = o.order_items || [];
+      items.forEach((it: any) => {
+        itemRows.push({
+          "Mã đơn": o.order_code || `#${o.id}`,
+          "Sản phẩm": it.product_name,
+          "Màu": it.color || "",
+          "Size": it.size || "",
+          "SL đặt": it.quantity,
+          "SL thực": it.actual_quantity ?? "",
+          "Đơn giá": it.unit_price ? Number(it.unit_price).toLocaleString("vi-VN") + " đ" : "",
+          "Thành tiền": it.unit_price && it.actual_quantity
+            ? (it.unit_price * it.actual_quantity).toLocaleString("vi-VN") + " đ"
+            : "",
+        });
+      });
+    });
+
+    // 3. Tạo workbook + 2 sheet
+    const wb = XLSX.utils.book_new();
+
+    const ws1 = XLSX.utils.json_to_sheet(orderRows);
+    XLSX.utils.book_append_sheet(wb, ws1, "Danh sách đơn hàng");
+
+    const ws2 = XLSX.utils.json_to_sheet(itemRows);
+    XLSX.utils.book_append_sheet(wb, ws2, "Chi tiết sản phẩm");
+
+    // 4. Xuất file
+    const fileName = `Don_hang_${customer.name.replace(/[^a-zA-Z0-9]/g, "_")}_${dayjs().format("YYYYMMDD")}.xlsx`;
+    XLSX.writeFile(wb, fileName);
+  };
 
   const hasActiveFilters =
     statusFilter || customerFilter || orderDateFrom || orderDateTo || dueDateFrom || dueDateTo;
+  // === XUẤT CSV ===
 
+
+  const exportOrdersToCsv = async () => {
+    const { data, error } = await supabase
+      .from("orders")
+      .select(`
+        id,
+        order_code,
+        order_date,
+        due_date,
+        status,
+        total_amount,
+        customers ( name )
+      `)
+      .order("order_date", { ascending: true });
+
+    if (error) {
+      alert("Lỗi: " + error.message);
+      return;
+    }
+
+    const header = ["ID", "Ma_don", "Ten_khach_hang", "Ngay_dat", "Ngay_giao_du_kien", "Trang_thai", "Tong_tien"];
+    const lines = [header.join(",")];
+
+    for (const row of (data || []) as any[]) {
+      const line = [
+        row.id,
+        row.order_code ?? "",
+        row.customers?.name ?? "",
+        row.order_date ?? "",
+        row.due_date ?? "",
+        row.status ?? "",
+        row.total_amount ?? "",
+      ]
+        .map((v) => `"${String(v).replace(/"/g, '""')}"`)
+        .join(",");
+      lines.push(line);
+    }
+
+    const csvContent = lines.join("\r\n");
+    const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "orders_export.csv";
+    a.click();
+    URL.revokeObjectURL(url);
+  };
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-50 to-slate-100">
       {/* Modal preview hình */}
@@ -300,6 +439,80 @@ export default function OrdersPage() {
             <p className="text-sm text-slate-500 mt-1">Lọc, tìm kiếm & phân trang toàn diện</p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
+            <>
+              {/* Nút mới */}
+              <button
+                onClick={() => setShowCustomerExport(true)}
+                className="inline-flex items-center gap-2 px-3 py-2 rounded-lg border border-slate-300 text-sm font-medium text-slate-700 bg-white hover:bg-slate-50 transition"
+              >
+                <Users className="w-4 h-4" />
+                Xuất Excel theo khách
+              </button>
+
+              {/* Popup chọn khách */}
+              {showCustomerExport && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50 p-4">
+                  <div className="bg-white rounded-2xl shadow-2xl max-w-md w-full p-6">
+                    <div className="flex items-center justify-between mb-4">
+                      <h3 className="text-lg font-bold">Chọn khách hàng để xuất Excel</h3>
+                      <button onClick={() => setShowCustomerExport(false)} className="text-slate-500 hover:text-slate-700">
+                        <X className="w-5 h-5" />
+                      </button>
+                    </div>
+
+                    <input
+                      type="text"
+                      placeholder="Tìm khách hàng..."
+                      value={customerSearch}
+                      onChange={(e) => setCustomerSearch(e.target.value)}
+                      className="w-full px-4 py-2 border border-slate-300 rounded-xl mb-4 focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                      autoFocus
+                    />
+
+                    <div className="max-h-96 overflow-y-auto space-y-1">
+                      {customers
+                        .filter(c => c.name.toLowerCase().includes(customerSearch.toLowerCase()) || (c.code && c.code.toLowerCase().includes(customerSearch.toLowerCase())))
+                        .map((c) => (
+                          <button
+                            key={c.id}
+                            onClick={() => {
+                              exportCustomerOrders(c);
+                              setShowCustomerExport(false);
+                              setCustomerSearch("");
+                            }}
+                            className="w-full text-left px-4 py-3 rounded-lg hover:bg-emerald-50 transition flex items-center justify-between"
+                          >
+                            <span className="font-medium">
+                              {c.code ? `${c.code} - ${c.name}` : c.name}
+                            </span>
+                          </button>
+                        ))}
+                      {customers.filter(c => c.name.toLowerCase().includes(customerSearch.toLowerCase())).length === 0 && (
+                        <p className="text-center text-slate-500 py-8">Không tìm thấy khách hàng</p>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
+            </>
+            {/* XUẤT CSV */}
+            <button
+              onClick={exportOrdersToCsv}
+              className="inline-flex items-center gap-2 px-3 py-2 rounded-lg border border-slate-300 text-sm font-medium text-slate-700 bg-white hover:bg-slate-50 transition"
+            >
+              <Download className="w-4 h-4" />
+              Xuất CSV
+            </button>
+            {/* IMPORT EXCEL */}
+            <Link
+              href="/orders/import"
+              className="inline-flex items-center gap-2 px-3 py-2 rounded-lg border border-slate-300 text-sm font-medium text-slate-700 bg-white hover:bg-slate-50 transition"
+            >
+              <Upload className="w-4 h-4" />
+              Import Excel
+            </Link>
+
+
             <Link
               href="/"
               className="px-3 py-2 rounded-lg border border-slate-300 text-sm font-medium text-slate-700 bg-white hover:bg-slate-50 transition"

@@ -494,7 +494,9 @@ export default function NewOrderPage() {
                           </td>
                           <td className="px-4 py-3 text-right">
                             <input
-                              type="number"
+                              type="text"  // đổi từ number → text
+                              inputMode="numeric"
+                              pattern="[0-9]*"
                               value={row.quantity}
                               onChange={(e) => handleItemChange(i, "quantity", e.target.value)}
                               min="1"
@@ -504,14 +506,23 @@ export default function NewOrderPage() {
                             />
                           </td>
                           <td className="px-4 py-3 text-right">
+
                             <input
-                              type="number"
-                              value={row.unit_price}
-                              onChange={(e) => handleItemChange(i, "unit_price", e.target.value)}
-                              min="0"
-                              step="1000"
+                              type="text"  // đổi từ number → text
+                              inputMode="numeric"
+                              pattern="[0-9]*"
+                              value={row.unit_price ? Number(row.unit_price).toLocaleString("vi-VN") : ""}
+                              onChange={(e) => {
+                                // Chỉ cho phép số
+                                const val = e.target.value.replace(/[^0-9]/g, "");
+                                handleItemChange(i, "unit_price", val);
+                              }}
+                              onBlur={() => {
+                                // Khi rời ô thì tự động làm tròn theo 1.000 nếu muốn
+                                // Ví dụ: 2122 → 2000, hoặc bỏ qua cũng được
+                              }}
                               placeholder="0"
-                              className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm text-right focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                              className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm text-right font-medium focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500"
                             />
                           </td>
                           <td className="px-4 py-3 text-right font-medium">
