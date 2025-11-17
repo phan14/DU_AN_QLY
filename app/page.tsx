@@ -71,7 +71,7 @@ export default function DashboardPage() {
     // 3) Đếm customers
     const { count: customersCount, error: customersError } = await supabase
       .from("customers")
-      .select("id", { count: "exact", head: true });
+      .select("id", { count: "exact" as any, head: true });
 
     if (ordersError || itemsError || customersError) {
       console.error(ordersError ?? itemsError ?? customersError);
