@@ -159,9 +159,9 @@ export default function OrdersPage() {
           unit_price
         )
       `,
-        { count: "exact" }
+        { count: "exact" as "exact" }
       )
-      .order("due_date", { ascending: true, nullsLast: true });
+      .order("due_date", { ascending: true, nullsFirst: true } as any);
 
     // Lọc trạng thái
     if (statusFilter) {
