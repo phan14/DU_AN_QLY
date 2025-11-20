@@ -4,12 +4,13 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { supabase } from "../../lib/supabaseClient";
 import Link from "next/link";
-import { Calendar, User, Package, Image, Plus, Trash2, DollarSign, StickyNote, Clock, ShoppingBag } from "lucide-react";
+import { Calendar, User, Package, Image, Plus, Trash2, DollarSign, StickyNote, Clock, ShoppingBag, Search, UserPlus, X } from "lucide-react";
 
 type Customer = {
   id: number;
   name: string;
   code: string | null;
+  phone: string | null;
 };
 
 type OrderItemFormRow = {
@@ -71,32 +72,45 @@ export default function NewOrderPage() {
   const router = useRouter();
 
   const [customers, setCustomers] = useState<Customer[]>([]);
+  const [filteredCustomers, setFilteredCustomers] = useState<Customer[]>([]);
+  const [customerSearch, setCustomerSearch] = useState("");
+  const [showCustomerDropdown, setShowCustomerDropdown] = useState(false);
   const [loadingCustomers, setLoadingCustomers] = useState(false);
 
-  const [customerId, setCustomerId] = useState<string>("");
+  const [selectedCustomer, setSelectedCustomer] = useState<Customer | null>(null);
+
   const [orderCode, setOrderCode] = useState("");
   const [orderDateInput, setOrderDateInput] = useState(todayInputFormat());
   const [dueDateInput, setDueDateInput] = useState("");
   const [statusInput, setStatusInput] = useState("NEW");
-  const [noteInput, setNoteInput] = useState("");
+  const [noteInternal, setNoteInternal] = useState("");
+  const [noteCustomer, setNoteCustomer] = useState("");
 
   const [items, setItems] = useState<OrderItemFormRow[]>([
     { product_name: "", color: "", size: "", quantity: "", unit_price: "" },
   ]);
 
-  const [imageFile, setImageFile] = useState<File | null>(null);
-  const [imagePreview, setImagePreview] = useState<string | null>(null);
+  const [imageFiles, setImageFiles] = useState<File[]>([]);
+  const [imagePreviews, setImagePreviews] = useState<string[]>([]);
+
+  const [deposit, setDeposit] = useState("");
+  const [additionalCosts, setAdditionalCosts] = useState("");
+  const [additionalCostsDesc, setAdditionalCostsDesc] = useState("");
+  const [discount, setDiscount] = useState("");
+
   const [saving, setSaving] = useState(false);
 
-  // Load customers + auto code
   useEffect(() => {
     const load = async () => {
       setLoadingCustomers(true);
       const { data } = await supabase
         .from("customers")
-        .select("id, name, code")
+        .select("id, name, code, phone")
         .order("name", { ascending: true });
-      if (data) setCustomers(data);
+      if (data) {
+        setCustomers(data);
+        setFilteredCustomers(data);
+      }
       setLoadingCustomers(false);
 
       const code = await generateOrderCode();
@@ -105,16 +119,25 @@ export default function NewOrderPage() {
     load();
   }, []);
 
-  // Image preview
   useEffect(() => {
-    if (imageFile) {
-      const reader = new FileReader();
-      reader.onloadend = () => setImagePreview(reader.result as string);
-      reader.readAsDataURL(imageFile);
+    if (customerSearch.trim()) {
+      const keyword = customerSearch.toLowerCase();
+      const filtered = customers.filter(
+        c => c.name.toLowerCase().includes(keyword) || (c.phone && c.phone.includes(keyword))
+      );
+      setFilteredCustomers(filtered);
+      setShowCustomerDropdown(true);
     } else {
-      setImagePreview(null);
+      setFilteredCustomers(customers);
+      setShowCustomerDropdown(false);
     }
-  }, [imageFile]);
+  }, [customerSearch, customers]);
+
+  useEffect(() => {
+    const previews = imageFiles.map(file => URL.createObjectURL(file));
+    setImagePreviews(previews);
+    return () => previews.forEach(URL.revokeObjectURL);
+  }, [imageFiles]);
 
   const handleAddRow = () => {
     setItems((prev) => [
@@ -143,18 +166,45 @@ export default function NewOrderPage() {
     return qty * price;
   };
 
-  const calculateTotalAmount = () =>
+  const calculateTotalItems = () =>
     items.reduce((sum, row) => sum + calculateLineTotal(row), 0);
 
+  const calculateFinalAmount = () => {
+    const totalItems = calculateTotalItems();
+    const addCosts = parseFloat(additionalCosts) || 0;
+    const disc = parseFloat(discount) || 0;
+    const dep = parseFloat(deposit) || 0;
+    return totalItems + addCosts - disc - dep;
+  };
+
+  const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files || []);
+    setImageFiles(prev => [...prev, ...files]);
+  };
+
+  const handleRemoveImage = (index: number) => {
+    setImageFiles(prev => prev.filter((_, i) => i !== index));
+  };
+
+  const selectCustomer = (customer: Customer) => {
+    setSelectedCustomer(customer);
+    setCustomerSearch(customer.name);
+    setShowCustomerDropdown(false);
+  };
+
   const handleSaveOrder = async () => {
-    if (!customerId) return alert("Vui lòng chọn khách hàng.");
+    if (!selectedCustomer) return alert("Vui lòng chọn khách hàng.");
     if (!orderDateInput) return alert("Vui lòng chọn ngày đặt.");
 
     const validItems = items.filter(
       (i) => i.product_name.trim() && parseFloat(i.quantity) > 0
     );
     if (validItems.length === 0)
-      return alert("Vui lòng nhập ít nhất 1 sản phẩm hợp lệ.");
+      return alert("Vui lòng thêm ít nhất 1 sản phẩm vào đơn.");
+
+    if (!dueDateInput && !confirm("Bạn chắc chắn chưa đặt hạn giao cho đơn này?")) {
+      return;
+    }
 
     setSaving(true);
 
@@ -164,19 +214,26 @@ export default function NewOrderPage() {
 
     while (!inserted && retryCount < maxRetries) {
       try {
-        const totalAmount = calculateTotalAmount();
+        const totalItems = calculateTotalItems();
+        const finalAmount = calculateFinalAmount();
 
         const { data: newOrder, error: orderError } = await supabase
           .from("orders")
           .insert({
-            customer_id: +customerId,
+            customer_id: selectedCustomer.id,
             order_code: orderCode || null,
             order_date: orderDateInput,
             due_date: dueDateInput || null,
             status: statusInput,
-            total_amount: totalAmount,
-            note: noteInput || null,
-            main_image_url: null,
+            total_amount: totalItems,
+            additional_costs: parseFloat(additionalCosts) || 0,
+            additional_costs_desc: additionalCostsDesc || null,
+            discount: parseFloat(discount) || 0,
+            deposit: parseFloat(deposit) || 0,
+            final_amount: finalAmount,
+            note_internal: noteInternal || null,
+            note_customer: noteCustomer || null,
+            images_urls: [],
           })
           .select("id")
           .single();
@@ -205,28 +262,34 @@ export default function NewOrderPage() {
         const { error: itemsError } = await supabase.from("order_items").insert(itemsPayload);
         if (itemsError) throw new Error(`Lỗi lưu sản phẩm: ${itemsError.message}`);
 
-        if (imageFile) {
-          const ext = imageFile.name.split(".").pop();
-          const fileName = `order_${orderId}_${Date.now()}.${ext}`;
+        const imagesUrls: string[] = [];
+        for (const [idx, file] of imageFiles.entries()) {
+          const ext = file.name.split(".").pop();
+          const fileName = `order_${orderId}_${idx}_${Date.now()}.${ext}`;
           const filePath = `orders/${fileName}`;
 
           const { error: uploadError } = await supabase.storage
             .from("order-images")
-            .upload(filePath, imageFile, { upsert: true });
+            .upload(filePath, file, { upsert: true });
 
-          if (uploadError) throw new Error(`Lỗi upload ảnh: ${uploadError.message}`);
+          if (uploadError) throw new Error(`Lỗi upload ảnh ${idx}: ${uploadError.message}`);
 
           const { data: { publicUrl } } = supabase.storage
             .from("order-images")
             .getPublicUrl(filePath);
 
-          const { error: updateError } = await supabase
-            .from("orders")
-            .update({ main_image_url: publicUrl })
-            .eq("id", orderId);
-
-          if (updateError) throw new Error(`Lỗi cập nhật ảnh: ${updateError.message}`);
+          imagesUrls.push(publicUrl);
         }
+
+        const updates: any = { images_urls: imagesUrls };
+        if (imagesUrls.length > 0) updates.main_image_url = imagesUrls[0];
+
+        const { error: updateError } = await supabase
+          .from("orders")
+          .update(updates)
+          .eq("id", orderId);
+
+        if (updateError) throw new Error(`Lỗi cập nhật ảnh: ${updateError.message}`);
 
         alert("Tạo đơn hàng thành công!");
         router.push(`/orders/${orderId}`);
@@ -243,12 +306,12 @@ export default function NewOrderPage() {
     setSaving(false);
   };
 
-  const totalAmount = calculateTotalAmount();
+  const totalItems = calculateTotalItems();
+  const finalAmount = calculateFinalAmount();
   const selectedStatus = STATUS_OPTIONS.find(s => s.value === statusInput);
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-50 to-slate-100">
-      {/* Header */}
       <header className="border-b bg-white shadow-sm">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4 flex items-center justify-between">
           <div>
@@ -274,9 +337,7 @@ export default function NewOrderPage() {
 
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-          {/* Left: Form info */}
           <section className="lg:col-span-1 space-y-6">
-            {/* Customer */}
             <div className="bg-white rounded-2xl shadow-lg border border-slate-200 p-6">
               <div className="flex items-center gap-2 mb-4">
                 <div className="p-2 bg-blue-100 rounded-lg">
@@ -284,23 +345,45 @@ export default function NewOrderPage() {
                 </div>
                 <h2 className="text-lg font-semibold">Khách hàng</h2>
               </div>
-              <select
-                className={`w-full px-4 py-3 border rounded-xl text-sm focus:outline-none focus:ring-2 transition ${customerId ? "border-slate-300 focus:ring-blue-500" : "border-rose-300 focus:ring-rose-500"
-                  }`}
-                value={customerId}
-                onChange={(e) => setCustomerId(e.target.value)}
-              >
-                <option value="">Chọn khách hàng *</option>
-                {customers.map((c) => (
-                  <option key={c.id} value={c.id}>
-                    {c.code ? `${c.code} - ${c.name}` : c.name}
-                  </option>
-                ))}
-              </select>
-              {!customerId && <p className="mt-1 text-xs text-rose-600">Vui lòng chọn khách</p>}
+              <div className="relative">
+                <div className="relative">
+                  <input
+                    type="text"
+                    placeholder="Tìm tên hoặc SĐT..."
+                    value={customerSearch}
+                    onChange={(e) => setCustomerSearch(e.target.value)}
+                    onFocus={() => setShowCustomerDropdown(true)}
+                    className={`w-full px-4 py-3 border rounded-xl text-sm focus:outline-none focus:ring-2 transition pl-10 ${selectedCustomer ? "border-slate-300 focus:ring-blue-500" : "border-rose-300 focus:ring-rose-500"}`}
+                  />
+                  <Search className="absolute left-3 top-3 w-4 h-4 text-slate-400" />
+                </div>
+                {showCustomerDropdown && (
+                  <div className="absolute z-10 w-full bg-white border border-slate-300 rounded-xl mt-1 max-h-60 overflow-y-auto shadow-lg">
+                    {filteredCustomers.map((c) => (
+                      <button
+                        key={c.id}
+                        onClick={() => selectCustomer(c)}
+                        className="w-full text-left px-4 py-3 hover:bg-blue-50 transition flex justify-between"
+                      >
+                        <span>{c.name} {c.phone ? `(${c.phone})` : ""}</span>
+                        {c.code && <span className="text-slate-500">{c.code}</span>}
+                      </button>
+                    ))}
+                    {filteredCustomers.length === 0 && (
+                      <p className="px-4 py-3 text-slate-500">Không tìm thấy khách</p>
+                    )}
+                  </div>
+                )}
+                <button
+                  onClick={() => router.push("/customers")}
+                  className="mt-2 flex items-center gap-1 text-sm text-blue-600 hover:text-blue-800"
+                >
+                  <UserPlus className="w-4 h-4" /> + Thêm khách mới
+                </button>
+              </div>
+              {!selectedCustomer && <p className="mt-1 text-xs text-rose-600">Vui lòng chọn khách</p>}
             </div>
 
-            {/* Order Info */}
             <div className="bg-white rounded-2xl shadow-lg border border-slate-200 p-6 space-y-4">
               <div className="flex items-center gap-2">
                 <div className="p-2 bg-indigo-100 rounded-lg">
@@ -320,7 +403,6 @@ export default function NewOrderPage() {
                 />
               </div>
 
-              {/* NGÀY ĐẶT - ĐÃ SỬA HIỂN THỊ */}
               <div>
                 <label className="block text-sm font-medium text-slate-700 mb-1.5 flex items-center gap-1">
                   <Calendar className="w-4 h-4" /> Ngày đặt
@@ -341,7 +423,6 @@ export default function NewOrderPage() {
                 </div>
               </div>
 
-              {/* DỰ KIẾN GIAO - ĐÃ SỬA HIỂN THỊ */}
               <div>
                 <label className="block text-sm font-medium text-slate-700 mb-1.5 flex items-center gap-1">
                   <Clock className="w-4 h-4" /> Dự kiến giao
@@ -384,48 +465,129 @@ export default function NewOrderPage() {
                 )}
               </div>
 
-              <div>
-                <label className="block text-sm font-medium text-slate-700 mb-1.5 flex items-center gap-1">
-                  <DollarSign className="w-4 h-4" /> Tổng tiền
-                </label>
-                <div className="w-full px-4 py-3 bg-emerald-50 border border-emerald-200 rounded-xl text-lg font-bold text-emerald-700">
-                  {totalAmount.toLocaleString("vi-VN")} đ
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1.5 flex items-center gap-1">
+                    <DollarSign className="w-4 h-4" /> Tiền cọc (tùy chọn)
+                  </label>
+                  <input
+                    type="text"
+                    inputMode="numeric"
+                    pattern="[0-9]*"
+                    value={deposit ? Number(deposit).toLocaleString("vi-VN") : ""}
+                    onChange={(e) => setDeposit(e.target.value.replace(/[^0-9]/g, ""))}
+                    placeholder="0"
+                    className="w-full px-4 py-3 border border-slate-300 rounded-xl text-sm text-right focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1.5 flex items-center gap-1">
+                    <DollarSign className="w-4 h-4" /> Phụ phí (tùy chọn)
+                  </label>
+                  <input
+                    type="text"
+                    inputMode="numeric"
+                    pattern="[0-9]*"
+                    value={additionalCosts ? Number(additionalCosts).toLocaleString("vi-VN") : ""}
+                    onChange={(e) => setAdditionalCosts(e.target.value.replace(/[^0-9]/g, ""))}
+                    placeholder="0"
+                    className="w-full px-4 py-3 border border-slate-300 rounded-xl text-sm text-right focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1.5">Mô tả phụ phí</label>
+                  <input
+                    type="text"
+                    value={additionalCostsDesc}
+                    onChange={(e) => setAdditionalCostsDesc(e.target.value)}
+                    placeholder="In tag, thêu logo, vận chuyển..."
+                    className="w-full px-4 py-3 border border-slate-300 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1.5 flex items-center gap-1">
+                    <DollarSign className="w-4 h-4" /> Giảm giá (tùy chọn)
+                  </label>
+                  <input
+                    type="text"
+                    inputMode="numeric"
+                    pattern="[0-9]*"
+                    value={discount ? Number(discount).toLocaleString("vi-VN") : ""}
+                    onChange={(e) => setDiscount(e.target.value.replace(/[^0-9]/g, ""))}
+                    placeholder="0"
+                    className="w-full px-4 py-3 border border-slate-300 rounded-xl text-sm text-right focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1.5 flex items-center gap-1">
+                    <DollarSign className="w-4 h-4" /> Thành tiền cuối cùng
+                  </label>
+                  <div className="w-full px-4 py-3 bg-emerald-50 border border-emerald-200 rounded-xl text-lg font-bold text-emerald-700 text-right">
+                    {finalAmount.toLocaleString("vi-VN")} đ
+                  </div>
                 </div>
               </div>
 
               <div>
                 <label className="block text-sm font-medium text-slate-700 mb-1.5 flex items-center gap-1">
-                  <Image className="w-4 h-4" /> Hình ảnh (tùy chọn)
+                  <Image className="w-4 h-4" /> Hình ảnh (tùy chọn, nhiều ảnh)
                 </label>
                 <input
                   type="file"
                   accept="image/*"
-                  onChange={(e) => setImageFile(e.target.files?.[0] || null)}
+                  multiple
+                  onChange={handleImageUpload}
                   className="w-full text-sm text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-medium file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100"
                 />
-                {imagePreview && (
-                  <div className="mt-3">
-                    <img src={imagePreview} alt="Preview" className="w-full h-40 object-cover rounded-lg shadow-sm" />
+                {imagePreviews.length > 0 && (
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    {imagePreviews.map((preview, idx) => (
+                      <div key={idx} className="relative">
+                        <img src={preview} alt={`Preview ${idx}`} className="w-20 h-20 object-cover rounded-lg shadow-sm" />
+                        <button
+                          onClick={() => handleRemoveImage(idx)}
+                          className="absolute top-0 right-0 p-1 bg-rose-500 text-white rounded-full text-xs"
+                        >
+                          <X className="w-3 h-3" />
+                        </button>
+                      </div>
+                    ))}
                   </div>
                 )}
               </div>
 
               <div>
                 <label className="block text-sm font-medium text-slate-700 mb-1.5 flex items-center gap-1">
-                  <StickyNote className="w-4 h-4" /> Ghi chú
+                  <StickyNote className="w-4 h-4" /> Ghi chú nội bộ
                 </label>
                 <textarea
-                  value={noteInput}
-                  onChange={(e) => setNoteInput(e.target.value)}
+                  value={noteInternal}
+                  onChange={(e) => setNoteInternal(e.target.value)}
                   rows={3}
-                  placeholder="Giao 2 đợt, may tag riêng, thanh toán 50%..."
+                  placeholder="Giao 2 đợt, may tag riêng..."
+                  className="w-full px-4 py-3 border border-slate-300 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 resize-none"
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1.5 flex items-center gap-1">
+                  <StickyNote className="w-4 h-4" /> Ghi chú cho khách
+                </label>
+                <textarea
+                  value={noteCustomer}
+                  onChange={(e) => setNoteCustomer(e.target.value)}
+                  rows={3}
+                  placeholder="Thanh toán 50% khi nhận hàng..."
                   className="w-full px-4 py-3 border border-slate-300 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 resize-none"
                 />
               </div>
             </div>
           </section>
 
-          {/* Right: Product Table */}
           <section className="lg:col-span-2">
             <div className="bg-white rounded-2xl shadow-lg border border-slate-200 p-6">
               <div className="flex items-center justify-between mb-5">
@@ -460,8 +622,6 @@ export default function NewOrderPage() {
                   <tbody>
                     {items.map((row, i) => {
                       const lineTotal = calculateLineTotal(row);
-                      const isValid = row.product_name.trim() && parseFloat(row.quantity) > 0;
-
                       return (
                         <tr key={i} className="border-b hover:bg-slate-50 transition">
                           <td className="px-4 py-3">
@@ -494,7 +654,7 @@ export default function NewOrderPage() {
                           </td>
                           <td className="px-4 py-3 text-right">
                             <input
-                              type="text"  // đổi từ number → text
+                              type="text"
                               inputMode="numeric"
                               pattern="[0-9]*"
                               value={row.quantity}
@@ -506,23 +666,17 @@ export default function NewOrderPage() {
                             />
                           </td>
                           <td className="px-4 py-3 text-right">
-
                             <input
-                              type="text"  // đổi từ number → text
+                              type="text"
                               inputMode="numeric"
                               pattern="[0-9]*"
                               value={row.unit_price ? Number(row.unit_price).toLocaleString("vi-VN") : ""}
                               onChange={(e) => {
-                                // Chỉ cho phép số
                                 const val = e.target.value.replace(/[^0-9]/g, "");
                                 handleItemChange(i, "unit_price", val);
                               }}
-                              onBlur={() => {
-                                // Khi rời ô thì tự động làm tròn theo 1.000 nếu muốn
-                                // Ví dụ: 2122 → 2000, hoặc bỏ qua cũng được
-                              }}
                               placeholder="0"
-                              className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm text-right font-medium focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500"
+                              className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm text-right font-medium focus:outline-none focus:ring-2 focus:ring-emerald-500"
                             />
                           </td>
                           <td className="px-4 py-3 text-right font-medium">
@@ -547,15 +701,14 @@ export default function NewOrderPage() {
 
               <div className="mt-6 pt-4 border-t border-slate-200 flex justify-end">
                 <div className="text-right">
-                  <p className="text-sm text-slate-600">Tổng cộng</p>
+                  <p className="text-sm text-slate-600">Tổng cộng sản phẩm</p>
                   <p className="text-2xl font-bold text-emerald-700">
-                    {totalAmount.toLocaleString("vi-VN")} đ
+                    {totalItems.toLocaleString("vi-VN")} đ
                   </p>
                 </div>
               </div>
             </div>
 
-            {/* Save Button */}
             <div className="mt-8 text-center">
               <button
                 onClick={handleSaveOrder}

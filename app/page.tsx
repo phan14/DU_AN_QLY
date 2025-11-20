@@ -40,6 +40,17 @@ const STATUS_LABELS: Record<string, string> = {
   CANCELLED: "Hủy",
 };
 
+const STATUS_COLORS: Record<string, string> = {
+  NEW: "bg-blue-500",
+  APPROVED: "bg-green-500",
+  CUTTING: "bg-indigo-500",
+  SEWING: "bg-purple-500",
+  FINISHING: "bg-yellow-500",
+  DONE: "bg-teal-500",
+  DELIVERED: "bg-emerald-500",
+  CANCELLED: "bg-red-500",
+};
+
 function formatMoney(v: number) {
   return v > 0 ? v.toLocaleString("vi-VN") + " đ" : "0 đ";
 }
@@ -47,8 +58,10 @@ function formatMoney(v: number) {
 export default function DashboardPage() {
   const [stats, setStats] = useState<DashboardStats>(initialStats);
   const [loading, setLoading] = useState(false);
+  const [updateTime, setUpdateTime] = useState<string>("");
+  const [period, setPeriod] = useState<"today" | "week" | "month" | "year">("month"); // Default to month
 
-  const loadStats = useCallback(async () => {
+  const loadStats = useCallback(async (selectedPeriod: typeof period) => {
     setLoading(true);
 
     const today = dayjs();
@@ -56,6 +69,24 @@ export default function DashboardPage() {
     const threeDaysStr = today.add(3, "day").format("YYYY-MM-DD");
     const startOfYearStr = today.startOf("year").format("YYYY-MM-DD");
     const startOfMonthStr = today.startOf("month").format("YYYY-MM-DD");
+
+    let startDate: string;
+    switch (selectedPeriod) {
+      case "today":
+        startDate = today.startOf("day").format("YYYY-MM-DD");
+        break;
+      case "week":
+        startDate = today.subtract(6, "day").format("YYYY-MM-DD"); // 7 days including today
+        break;
+      case "month":
+        startDate = startOfMonthStr;
+        break;
+      case "year":
+        startDate = startOfYearStr;
+        break;
+      default:
+        startDate = startOfMonthStr;
+    }
 
     // 1) Lấy orders
     const { data: ordersData, error: ordersError } = await supabase
@@ -68,7 +99,7 @@ export default function DashboardPage() {
       .from("order_items")
       .select("order_id, quantity");
 
-    // 3) Đếm customers
+    // 3) Đếm customers (luôn tổng, không filter theo period)
     const { count: customersCount, error: customersError } = await supabase
       .from("customers")
       .select("id", { count: "exact" as any, head: true });
@@ -80,8 +111,15 @@ export default function DashboardPage() {
       return;
     }
 
-    const orders = ordersData ?? [];
-    const items = itemsData ?? [];
+    const allOrders = ordersData ?? [];
+    const allItems = itemsData ?? [];
+
+    // Filter orders theo period
+    const orders = allOrders.filter((o) => o.order_date >= startDate);
+
+    // Filter items theo orders đã filter
+    const orderIds = orders.map((o) => o.id);
+    const items = allItems.filter((i) => orderIds.includes(i.order_id));
 
     // --- Tính toán ---
     const ordersCount = orders.filter(async (o) => {
@@ -93,7 +131,7 @@ export default function DashboardPage() {
       return totalPlanned > 0;
     }).length;
 
-    let activeOrders = 0;
+    let activeOrders = 0; // Giữ current, không filter period
     let overdueOrders = 0;
     let upcomingOrders = 0;
     let monthRevenue = 0;
@@ -104,6 +142,13 @@ export default function DashboardPage() {
       const st = (o.status ?? "NEW") as string;
       statusCounts[st] = (statusCounts[st] ?? 0) + 1;
 
+      // Active, overdue, upcoming chỉ tính cho allOrders (current)
+      // Nhưng vì filter orders, ta tính statusCounts và revenue cho filtered orders
+    }
+
+    // Tính active/overdue/upcoming từ allOrders (current, không filter)
+    for (const o of allOrders) {
+      const st = (o.status ?? "NEW") as string;
       const isFinished = st === "DONE" || st === "DELIVERED" || st === "CANCELLED";
       if (!isFinished) activeOrders++;
 
@@ -112,7 +157,10 @@ export default function DashboardPage() {
         if (o.due_date >= todayStr && o.due_date <= threeDaysStr && !isFinished)
           upcomingOrders++;
       }
+    }
 
+    // Revenue từ filtered orders
+    for (const o of orders) {
       if (o.total_amount && o.order_date) {
         const amt = Number(o.total_amount) || 0;
         if (o.order_date >= startOfYearStr) yearRevenue += amt;
@@ -134,16 +182,17 @@ export default function DashboardPage() {
       statusCounts,
     });
 
+    setUpdateTime(today.format("HH:mm – DD/MM/YYYY"));
     setLoading(false);
   }, []);
 
   useEffect(() => {
-    loadStats();
+    loadStats(period);
 
     let timeout: NodeJS.Timeout;
     const debouncedLoad = () => {
       clearTimeout(timeout);
-      timeout = setTimeout(loadStats, 500);
+      timeout = setTimeout(() => loadStats(period), 500);
     };
 
     const channel = supabase
@@ -164,10 +213,15 @@ export default function DashboardPage() {
       clearTimeout(timeout);
       supabase.removeChannel(channel);
     };
-  }, [loadStats]);
+  }, [loadStats, period]);
 
-  const maxStatusCount =
-    Object.values(stats.statusCounts).reduce((max, v) => (v > max ? v : max), 0) || 1;
+  const totalOrders = Object.values(stats.statusCounts).reduce((sum, v) => sum + v, 0) || 1;
+  const maxStatusCount = Object.values(stats.statusCounts).reduce((max, v) => (v > max ? v : max), 0) || 1;
+
+  const deliveredCount = (stats.statusCounts.DONE || 0) + (stats.statusCounts.DELIVERED || 0);
+  const deliveredPercent = ((deliveredCount / totalOrders) * 100).toFixed(1);
+  const processingCount = stats.activeOrders; // Đang xử lý = activeOrders
+  const cancelledCount = stats.statusCounts.CANCELLED || 0;
 
   return (
     <div className="min-h-screen bg-slate-100">
@@ -184,11 +238,14 @@ export default function DashboardPage() {
       <main className="max-w-6xl mx-auto px-4 py-8 space-y-8">
         <section className="space-y-3">
           <div className="flex items-center justify-between">
-            <h2 className="text-lg font-semibold">Tổng quan hôm nay</h2>
+            <div>
+              <h2 className="text-lg font-semibold">Tổng quan hôm nay</h2>
+              <p className="text-xs text-slate-500">Cập nhật lúc {updateTime}</p>
+            </div>
             <div className="flex items-center gap-2">
               {loading && <span className="text-xs text-slate-500">Đang cập nhật số liệu...</span>}
               <button
-                onClick={loadStats}
+                onClick={() => loadStats(period)}
                 disabled={loading}
                 className="text-xs text-blue-600 hover:text-blue-700 underline disabled:opacity-50"
               >
@@ -197,24 +254,58 @@ export default function DashboardPage() {
             </div>
           </div>
 
+          {/* Filter thời gian */}
+          <div className="flex gap-2">
+            <button
+              onClick={() => setPeriod("today")}
+              className={`text-xs px-3 py-1 rounded-full ${period === "today" ? "bg-slate-900 text-white" : "bg-slate-200 text-slate-900"}`}
+            >
+              Hôm nay
+            </button>
+            <button
+              onClick={() => setPeriod("week")}
+              className={`text-xs px-3 py-1 rounded-full ${period === "week" ? "bg-slate-900 text-white" : "bg-slate-200 text-slate-900"}`}
+            >
+              7 ngày
+            </button>
+            <button
+              onClick={() => setPeriod("month")}
+              className={`text-xs px-3 py-1 rounded-full ${period === "month" ? "bg-slate-900 text-white" : "bg-slate-200 text-slate-900"}`}
+            >
+              Tháng này
+            </button>
+            <button
+              onClick={() => setPeriod("year")}
+              className={`text-xs px-3 py-1 rounded-full ${period === "year" ? "bg-slate-900 text-white" : "bg-slate-200 text-slate-900"}`}
+            >
+              Năm nay
+            </button>
+          </div>
+
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-            <div className="bg-white rounded-2xl border border-slate-200 p-4">
-              <p className="text-xs text-slate-500">Khách hàng</p>
-              <p className="text-2xl font-bold mt-1">{stats.customers}</p>
-              <p className="text-xs text-slate-400 mt-1">Brand / khách sỉ / khách lẻ đã lưu.</p>
-            </div>
+            <Link href="/customers" className="block hover:shadow-md transition-shadow">
+              <div className="bg-white rounded-2xl border border-slate-200 p-4">
+                <p className="text-xs text-slate-500">Khách hàng</p>
+                <p className="text-2xl font-bold mt-1">{stats.customers}</p>
+                <p className="text-xs text-slate-400 mt-1">Brand / khách sỉ / khách lẻ đã lưu.</p>
+              </div>
+            </Link>
 
-            <div className="bg-white rounded-2xl border border-slate-200 p-4">
-              <p className="text-xs text-slate-500">Tổng đơn hàng</p>
-              <p className="text-2xl font-bold mt-1">{stats.orders}</p>
-              <p className="text-xs text-slate-400 mt-1">Toàn bộ đơn đã tạo trong hệ thống.</p>
-            </div>
+            <Link href="/orders" className="block hover:shadow-md transition-shadow">
+              <div className="bg-white rounded-2xl border border-slate-200 p-4">
+                <p className="text-xs text-slate-500">Tổng đơn hàng</p>
+                <p className="text-2xl font-bold mt-1">{stats.orders}</p>
+                <p className="text-xs text-slate-400 mt-1">Toàn bộ đơn đã tạo trong hệ thống.</p>
+              </div>
+            </Link>
 
-            <div className="bg-white rounded-2xl border border-slate-200 p-4">
-              <p className="text-xs text-slate-500">Đơn đang xử lý</p>
-              <p className="text-2xl font-bold mt-1">{stats.activeOrders}</p>
-              <p className="text-xs text-slate-400 mt-1">Chưa DONE / DELIVERED / CANCELLED.</p>
-            </div>
+            <Link href="/orders?status=processing" className="block hover:shadow-md transition-shadow">
+              <div className="bg-white rounded-2xl border border-slate-200 p-4">
+                <p className="text-xs text-slate-500">Đơn đang xử lý</p>
+                <p className="text-2xl font-bold mt-1">{stats.activeOrders}</p>
+                <p className="text-xs text-slate-400 mt-1">Chưa DONE / DELIVERED / CANCELLED.</p>
+              </div>
+            </Link>
 
             <div className="bg-white rounded-2xl border border-slate-200 p-4">
               <p className="text-xs text-slate-500">Tổng số lượng (SP)</p>
@@ -236,19 +327,21 @@ export default function DashboardPage() {
               <p className="text-xs text-slate-400 mt-1">Giúp bạn xem nhanh kết quả năm nay.</p>
             </div>
 
-            <div className="bg-white rounded-2xl border border-slate-200 p-4">
-              <p className="text-xs text-slate-500">Cảnh báo deadline</p>
-              <div className="mt-2 space-y-1 text-xs">
-                <p>
-                  <span className="inline-block w-2 h-2 rounded-full bg-rose-500 mr-2" />
-                  Đơn đã trễ: <span className="font-semibold">{stats.overdueOrders}</span>
-                </p>
-                <p>
-                  <span className="inline-block w-2 h-2 rounded-full bg-amber-400 mr-2" />
-                  Đơn còn ≤ 3 ngày giao: <span className="font-semibold">{stats.upcomingOrders}</span>
-                </p>
+            <Link href="/orders?deadline=upcoming" className="block hover:shadow-md transition-shadow">
+              <div className="bg-white rounded-2xl border border-slate-200 p-4">
+                <p className="text-xs text-slate-500">Cảnh báo deadline</p>
+                <div className="mt-2 space-y-1 text-xs">
+                  <p>
+                    <span className="inline-block w-2 h-2 rounded-full bg-rose-500 mr-2" />
+                    Đơn đã trễ: <span className="font-semibold">{stats.overdueOrders}</span> ⚠️
+                  </p>
+                  <p>
+                    <span className="inline-block w-2 h-2 rounded-full bg-amber-400 mr-2" />
+                    Đơn còn ≤ 3 ngày giao: <span className="font-semibold">{stats.upcomingOrders}</span>
+                  </p>
+                </div>
               </div>
-            </div>
+            </Link>
           </div>
         </section>
 
@@ -266,7 +359,8 @@ export default function DashboardPage() {
 
               {Object.entries(stats.statusCounts).map(([status, count]) => {
                 const label = STATUS_LABELS[status] ?? status;
-                const percent = (count / maxStatusCount) * 100;
+                const percent = ((count / totalOrders) * 100).toFixed(1);
+                const widthPercent = (count / maxStatusCount) * 100;
 
                 return (
                   <div key={status}>
@@ -274,16 +368,24 @@ export default function DashboardPage() {
                       <span>{label}</span>
                       <span className="text-slate-500">{count} đơn</span>
                     </div>
-                    <div className="h-2 bg-slate-100 rounded-full overflow-hidden">
+                    <div
+                      className="h-2 bg-slate-100 rounded-full overflow-hidden"
+                      title={`${count} (${percent}%)`}
+                    >
                       <div
-                        className="h-full bg-slate-900 rounded-full"
-                        style={{ width: `${percent}%` }}
+                        className={`h-full ${STATUS_COLORS[status] || "bg-slate-900"} rounded-full`}
+                        style={{ width: `${widthPercent}%` }}
                       />
                     </div>
                   </div>
                 );
               })}
             </div>
+
+            {/* Dòng tóm tắt */}
+            <p className="text-xs text-slate-500 mt-4">
+              Tổng đơn: {totalOrders} | Đã giao: {deliveredCount} ({deliveredPercent}%) | Đang xử lý: {processingCount} | Đã huỷ: {cancelledCount}
+            </p>
           </div>
 
           <div className="space-y-3">
