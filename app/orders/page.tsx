@@ -248,7 +248,13 @@ export default function OrdersPage() {
           };
         }) ?? [];
 
-      setOrders(rows.filter((o) => o.total_planned > 0));
+      // setOrders(rows.filter((o) => o.total_planned > 0));
+      setOrders(rows)
+      // hoặc nếu muốn hiển thị nhưng đánh dấu:
+rows.map(order => ({
+   ...order,
+   _hasNoItems: order.total_planned === 0
+}));
       setTotalCount(count ?? 0);
     }
 
